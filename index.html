@@ -4,6 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Rekap & Upload Foto Meteran PLN</title>
+    
+    <!-- Pannellum 360 Viewer Library -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css">
+    <script src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js"></script>
+
     <style>
         * { box-sizing: border-box; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
         body { margin: 0; padding: 15px; background-color: #f4f6f9; color: #333; }
@@ -22,11 +27,9 @@
         th { background-color: #004085; color: white; padding: 12px 10px; position: sticky; top: 0; z-index: 10; }
         td { padding: 10px; border-bottom: 1px solid #eee; vertical-align: middle; }
         tr:hover { background-color: #f1f5f9; }
-        .badge { background: #e2e8f0; padding: 3px 6px; border-radius: 4px; font-size: 11px; font-weight: bold; }
         
-        /* Gaya untuk Drag & Drop dan Tombol */
         .action-cell { display: flex; gap: 8px; align-items: center; }
-        .drop-zone { border: 2px dashed #0056b3; border-radius: 6px; padding: 10px; text-align: center; background: #f8fbff; transition: 0.2s; position: relative; min-width: 140px; }
+        .drop-zone { border: 2px dashed #0056b3; border-radius: 6px; padding: 10px; text-align: center; background: #f8fbff; transition: 0.2s; position: relative; min-width: 130px; }
         .drop-zone.dragover { background: #cce5ff; border-color: #004085; transform: scale(1.02); }
         .drop-text { font-size: 10px; color: #555; display: block; margin-bottom: 5px; pointer-events: none; }
         
@@ -34,16 +37,24 @@
         .btn-upload { background-color: #28a745; color: white; padding: 4px 10px; border-radius: 4px; font-size: 11px; font-weight: bold; cursor: pointer; border: none; }
         .upload-btn-wrapper input[type=file] { font-size: 100px; position: absolute; left: 0; top: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
         
-        .btn-view360 { background-color: #17a2b8; color: white; padding: 8px 12px; border-radius: 4px; font-size: 11px; font-weight: bold; cursor: pointer; border: none; text-decoration: none; }
+        .btn-view360 { background-color: #17a2b8; color: white; padding: 8px 12px; border-radius: 4px; font-size: 11px; font-weight: bold; cursor: pointer; border: none; }
         .btn-view360:hover { background-color: #138496; }
+        .btn-view360:disabled { background-color: #ccc; cursor: not-allowed; }
         .loading-text { font-size: 11px; color: #ff9800; font-weight: bold; }
+
+        /* Modal Viewer 360 */
+        .modal { display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); z-index: 1000; justify-content: center; align-items: center; }
+        .modal-content { width: 95%; height: 90%; background: #000; position: relative; border-radius: 8px; overflow: hidden; box-shadow: 0 0 20px rgba(255,255,255,0.2); }
+        #panorama { width: 100%; height: 100%; }
+        .close-btn { position: absolute; top: 15px; right: 20px; color: white; font-size: 20px; font-weight: bold; cursor: pointer; z-index: 1010; background: rgba(255,0,0,0.7); padding: 5px 15px; border-radius: 5px; border: 1px solid white; }
+        .close-btn:hover { background: red; }
     </style>
 </head>
 <body>
 
     <div class="header">
         <h2>⚡ Rekap & Upload Foto 360 ke Google Drive</h2>
-        <p id="totalInfo">Memuat data CSV...</p>
+        <p id="totalInfo">Sinkronisasi Database... Mohon tunggu.</p>
     </div>
 
     <div class="control-panel">
@@ -68,32 +79,83 @@
         </div>
     </div>
 
+    <!-- Modal Pop-up 360 Viewer -->
+    <div id="viewerModal" class="modal">
+        <div class="modal-content">
+            <button class="close-btn" onclick="closeViewer()">TUTUP X</button>
+            <div id="panorama"></div>
+        </div>
+    </div>
+
     <!-- PapaParse Library -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
 
     <script>
-        // PASTIKAN URL INI ADALAH URL DEPLOY BARU KAMU
+        // ================= PENGATURAN =================
+        // 1. URL Apps Script (Backend Upload)
         const APPS_SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxHOcgLckW1vKyMdarEuVbZjMua_5jy6OnHjEDfcl8zfb8_jLO0B2EwibTv16sdOpVy/exec";
         
+        // 2. ID Spreadsheet Google Sheets (Database Foto)
+        const SPREADSHEET_ID = "MASUKKAN_ID_SPREADSHEET_DISINI"; 
+        // ==============================================
+
+        const SHEET_CSV_URL = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/export?format=csv`;
         let allData = [];
+        let photoDatabase = {}; // Menyimpan IDPel -> ID File Google Drive
+        let panViewer = null; // Variabel untuk player Pannellum
 
-        Papa.parse("rekap_data_pelanggan.csv", {
-            download: true,
-            header: true,
-            skipEmptyLines: true,
-            complete: function(results) {
-                allData = results.data;
-                document.getElementById("totalInfo").innerText = `Total Pelanggan: ${allData.length} data`;
-                renderTable(allData);
-            }
-        });
+        // PROSES 1: Ambil data foto dari Google Sheets dulu
+        if(SPREADSHEET_ID !== "MASUKKAN_ID_SPREADSHEET_DISINI") {
+            Papa.parse(SHEET_CSV_URL, {
+                download: true,
+                header: false, // Karena dari script tadi tidak pakai header
+                complete: function(results) {
+                    results.data.forEach(row => {
+                        // row[0] adalah IDPel, row[2] adalah File ID dari Google Drive
+                        if(row[0] && row[2]) {
+                            photoDatabase[row[0].toString().trim()] = row[2].trim();
+                        }
+                    });
+                    loadDataPelanggan(); // Lanjut ambil data pelanggan
+                },
+                error: function() {
+                    console.warn("Gagal membaca Google Sheets. Pastikan aksesnya Siapa Saja (Viewer).");
+                    loadDataPelanggan();
+                }
+            });
+        } else {
+            loadDataPelanggan();
+        }
 
+        // PROSES 2: Ambil data pelanggan dari CSV statis
+        function loadDataPelanggan() {
+            Papa.parse("rekap_data_pelanggan.csv", {
+                download: true,
+                header: true,
+                skipEmptyLines: true,
+                complete: function(results) {
+                    allData = results.data;
+                    document.getElementById("totalInfo").innerText = `Total Pelanggan: ${allData.length} data | Database Tersinkronisasi ✅`;
+                    renderTable(allData);
+                }
+            });
+        }
+
+        // Tampilkan Tabel
         function renderTable(data) {
             const body = document.getElementById("tableBody");
             body.innerHTML = "";
 
             data.forEach((row, index) => {
                 const idpel = row['ID Pelanggan'] ? row['ID Pelanggan'].trim() : `row_${index}`;
+                
+                // Cek apakah IDPel ini ada di Database Google Sheets kita
+                const hasPhoto = photoDatabase[idpel] ? true : false;
+                
+                // Jika punya foto, tombol aktif. Jika belum, tombol abu-abu.
+                const btnView = hasPhoto 
+                    ? `<button class="btn-view360" onclick="open360('${idpel}')">👁️ Lihat 360</button>`
+                    : `<button class="btn-view360" disabled title="Foto belum diupload">❌ Belum Ada Foto</button>`;
 
                 let tr = document.createElement("tr");
                 tr.innerHTML = `
@@ -103,20 +165,17 @@
                     <td>${row['Alamat Pelanggan'] || '-'}</td>
                     <td id="cell_${idpel}">
                         <div class="action-cell">
-                            <!-- Area Drag and Drop -->
                             <div class="drop-zone" id="drop_${idpel}" 
                                  ondragover="handleDragOver(event, this)" 
                                  ondragleave="handleDragLeave(event, this)" 
                                  ondrop="handleDrop(event, this, '${idpel}', '${row['Nama Pelanggan'] || ''}')">
-                                 <span class="drop-text">Seret Foto Kesini<br>atau</span>
+                                 <span class="drop-text">Seret Foto<br>atau</span>
                                  <div class="upload-btn-wrapper">
-                                     <button class="btn-upload">Pilih File</button>
+                                     <button class="btn-upload">Upload</button>
                                      <input type="file" accept="image/*" onchange="processFile(this.files[0], '${idpel}', '${row['Nama Pelanggan'] || ''}')">
                                  </div>
                             </div>
-                            
-                            <!-- Tombol Viewer 360 (Persiapan tahap selanjutnya) -->
-                            <button class="btn-view360" onclick="alert('Fitur 360 Viewer segera hadir!')">👁️ Lihat 360</button>
+                            ${btnView}
                         </div>
                     </td>
                 `;
@@ -124,36 +183,49 @@
             });
         }
 
-        // --- FUNGSI DRAG AND DROP ---
-        function handleDragOver(e, element) {
-            e.preventDefault();
-            element.classList.add('dragover');
+        // --- FUNGSI VIEWER 360 (PANNELLUM) ---
+        function open360(idpel) {
+            const fileId = photoDatabase[idpel];
+            if(!fileId) return;
+
+            document.getElementById('viewerModal').style.display = 'flex';
+
+            // Menggunakan Proxy untuk menghindari blokir CORS Google Drive saat render WebGL (360)
+            const gdriveUrl = `https://drive.google.com/uc?export=view&id=${fileId}`;
+            const corsProxyUrl = `https://corsproxy.io/?${encodeURIComponent(gdriveUrl)}`;
+
+            // Bersihkan viewer lama jika ada
+            if(panViewer) { panViewer.destroy(); }
+
+            // Nyalakan Pannellum
+            panViewer = pannellum.viewer('panorama', {
+                "type": "equirectangular",
+                "panorama": corsProxyUrl,
+                "autoLoad": true,
+                "compass": true
+            });
         }
 
-        function handleDragLeave(e, element) {
-            e.preventDefault();
-            element.classList.remove('dragover');
-        }
-
-        function handleDrop(e, element, idpel, nama) {
-            e.preventDefault();
-            element.classList.remove('dragover');
-            const files = e.dataTransfer.files;
-            if (files.length > 0) {
-                processFile(files[0], idpel, nama);
+        function closeViewer() {
+            document.getElementById('viewerModal').style.display = 'none';
+            if(panViewer) {
+                panViewer.destroy();
+                panViewer = null;
             }
         }
 
-        // --- FUNGSI PROSES DAN UPLOAD ---
+        // --- FUNGSI UPLOAD DRAG & DROP ---
+        function handleDragOver(e, element) { e.preventDefault(); element.classList.add('dragover'); }
+        function handleDragLeave(e, element) { e.preventDefault(); element.classList.remove('dragover'); }
+        function handleDrop(e, element, idpel, nama) {
+            e.preventDefault(); element.classList.remove('dragover');
+            if (e.dataTransfer.files.length > 0) processFile(e.dataTransfer.files[0], idpel, nama);
+        }
+
         function processFile(file, idpel, nama) {
             if (!file) return;
-
-            // Cek PIN Admin sebelum memproses
             const pinAdmin = document.getElementById('adminPin').value;
-            if(pinAdmin === "") {
-                alert("Masukkan PIN Upload di kolom kuning atas terlebih dahulu!");
-                return;
-            }
+            if(pinAdmin === "") { alert("Masukkan PIN Upload di kolom kuning atas terlebih dahulu!"); return; }
 
             const cell = document.getElementById(`cell_${idpel}`);
             cell.innerHTML = `<span class="loading-text">⏳ Mengunggah... (Tunggu ya)</span>`;
@@ -162,81 +234,55 @@
             reader.onload = function(e) {
                 const img = new Image();
                 img.src = e.target.result;
-                
                 img.onload = function() {
                     const canvas = document.createElement('canvas');
-                    const MAX_WIDTH = 1200; // Dilebarkan sedikit karena foto 360 butuh resolusi lebih tinggi
+                    const MAX_WIDTH = 1200; 
                     let scale = 1;
                     if(img.width > MAX_WIDTH) { scale = MAX_WIDTH / img.width; }
-                    
                     canvas.width = img.width * scale;
                     canvas.height = img.height * scale;
-                    
                     const ctx = canvas.getContext('2d');
                     ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-                    
                     const base64Data = canvas.toDataURL('image/jpeg', 0.8);
                     const cleanName = nama.replace(/[^a-zA-Z0-9]/g, "_");
                     
-                    // Bikin Iframe & Form
                     const iframeName = "iframe_" + idpel;
                     let iframe = document.createElement("iframe");
-                    iframe.name = iframeName;
-                    iframe.style.display = "none";
+                    iframe.name = iframeName; iframe.style.display = "none";
                     document.body.appendChild(iframe);
 
                     let form = document.createElement("form");
-                    form.method = "POST";
-                    form.action = APPS_SCRIPT_URL;
-                    form.target = iframeName;
-                    form.style.display = "none";
+                    form.method = "POST"; form.action = APPS_SCRIPT_URL;
+                    form.target = iframeName; form.style.display = "none";
 
-                    // Input Nama File
                     let inputName = document.createElement("input");
-                    inputName.type = "hidden";
-                    inputName.name = "filename";
-                    inputName.value = `${idpel}_${cleanName}.jpg`;
+                    inputName.type = "hidden"; inputName.name = "filename"; inputName.value = `${idpel}_${cleanName}.jpg`;
 
-                    // Input Base64
                     let inputBase64 = document.createElement("input");
-                    inputBase64.type = "hidden";
-                    inputBase64.name = "base64";
-                    inputBase64.value = base64Data;
+                    inputBase64.type = "hidden"; inputBase64.name = "base64"; inputBase64.value = base64Data;
 
-                    // Input PIN (Password) ke Backend
                     let inputPassword = document.createElement("input");
-                    inputPassword.type = "hidden";
-                    inputPassword.name = "password";
-                    inputPassword.value = pinAdmin;
+                    inputPassword.type = "hidden"; inputPassword.name = "password"; inputPassword.value = pinAdmin;
 
-                    form.appendChild(inputName);
-                    form.appendChild(inputBase64);
-                    form.appendChild(inputPassword);
+                    form.appendChild(inputName); form.appendChild(inputBase64); form.appendChild(inputPassword);
                     document.body.appendChild(form);
 
-                    // Tangkap respon iframe
                     iframe.onload = function() {
-                        // Karena kita tidak bisa baca isi iframe (CORS), kita asumsikan jika load selesai berarti request terkirim
-                        cell.innerHTML = `<span style="color:green; font-weight:bold; font-size:12px;">✅ Terkirim ke Drive</span>`;
-                        setTimeout(() => {
-                            document.body.removeChild(form);
-                            document.body.removeChild(iframe);
-                        }, 2000);
+                        cell.innerHTML = `<span style="color:green; font-weight:bold; font-size:12px;">✅ Terkirim. Refresh web!</span>`;
+                        setTimeout(() => { document.body.removeChild(form); document.body.removeChild(iframe); }, 2000);
                     };
-
                     form.submit();
                 };
             };
             reader.readAsDataURL(file);
         }
 
+        // Pencarian Data
         function filterData() {
             const keyword = document.getElementById("searchInput").value.toLowerCase();
             const filtered = allData.filter(row => {
-                return (
-                    (row['ID Pelanggan'] && row['ID Pelanggan'].toLowerCase().includes(keyword)) ||
-                    (row['Nama Pelanggan'] && row['Nama Pelanggan'].toLowerCase().includes(keyword))
-                );
+                return ((row['ID Pelanggan'] && row['ID Pelanggan'].toLowerCase().includes(keyword)) ||
+                        (row['Nama Pelanggan'] && row['Nama Pelanggan'].toLowerCase().includes(keyword)));
             });
             renderTable(filtered);
         }
